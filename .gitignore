@@ -15,3 +15,5 @@ Thumbs.db
 .bak-*/
 *.bak
 *.bak-*
+build.log
+*.log
