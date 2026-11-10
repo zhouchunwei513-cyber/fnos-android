@@ -10,3 +10,8 @@ local.properties
 # 系统
 .DS_Store
 Thumbs.db
+
+# 开发备份目录（不要入库）
+.bak-*/
+*.bak
+*.bak-*
