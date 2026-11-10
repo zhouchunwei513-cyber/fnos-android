@@ -1,0 +1,14 @@
+{
+  "server": "100.103.38.13:5666",
+  "line": "lan",
+  "activeSkin": "tablet-test",
+  "lastUser": "",
+  "patchUrl": "http://100.103.38.13:8899",
+  "titleBarMaterial": "solid",
+  "titleBarSolidColor": "#101426",
+  "titleBarSolidAlpha": 100,
+  "barCorner": "round-large",
+  "winCorner": "round-large",
+  "titleBarDivider": true,
+  "hideAccountBall": false
+}

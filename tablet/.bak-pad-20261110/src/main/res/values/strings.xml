@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">飞牛平板</string>
+    <string name="connect_title">连接飞牛 NAS</string>
+    <string name="server_hint">服务器地址（如 192.168.31.101:5666）</string>
+    <string name="connect">连接</string>
+    <string name="line_lan">内网</string>
+    <string name="line_ipv6">IPv6</string>
+    <string name="line_frp">FRP</string>
+    <string name="line_fnid">FNID</string>
+</resources>

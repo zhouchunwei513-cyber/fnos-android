@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  debug 专用清单覆盖（只影响 assembleDebug，不进发布包）
+  ==================================================================
+  目的：电视直播页 LiveActivity 在主清单里是 exported="false"（正常从应用内菜单进入），
+  但 adb shell 属于外部调用方，非导出的 Activity 会被系统静默拒绝启动，
+  真机联调时无法直接 am start 到直播页取截图/日志。
+
+  所以只在 debug 构建里把它放开导出；release/发布清单一个字节都不改。
+  验证完（或用 release 打包）时行为完全等同主清单。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application>
+        <activity
+            android:name=".LiveActivity"
+            android:exported="true"
+            tools:replace="android:exported" />
+    </application>
+
+</manifest>
