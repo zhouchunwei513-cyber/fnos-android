@@ -120,6 +120,22 @@ class MainActivity : AppCompatActivity(), TitlebarHost, MenuTarget {
             cold.removeExtra("openSettings")
             startActivity(Intent(this, SettingsWebActivity::class.java))
         }
+        // v5.1.33（用户任务 1 真机自检）：不经界面直接钉一个应用到桌面
+        //   adb shell am start -n com.fnos.tablet/.MainActivity --es pinApp trim.media
+        cold?.getStringExtra("pinApp")?.takeIf { it.isNotBlank() }?.let { aid ->
+            cold.removeExtra("pinApp")
+            val base = Settings.load(this).server
+            val entry = Apps.find(this, aid) ?: Apps.Entry(aid, aid, aid)
+            window.decorView.postDelayed({
+                try {
+                    val r = Shortcuts.requestPin(this, entry, base)
+                    Log2.w(this, "selftest: pinApp $aid ok=${r.ok} supported=${r.supported} msg=${r.msg}")
+                    android.widget.Toast.makeText(this, r.msg, android.widget.Toast.LENGTH_LONG).show()
+                } catch (t: Throwable) {
+                    Log2.w(this, "selftest: pinApp $aid failed ${t.message}")
+                }
+            }, 1200)
+        }
     }
 
     // ------------------------------------------------------------------ 登录页
@@ -296,6 +312,13 @@ class MainActivity : AppCompatActivity(), TitlebarHost, MenuTarget {
         i.putExtra("anchor", anchor)
         i.putExtra("url", url)
         i.putExtra("base", base)
+        // v5.1.34（Bug A）：桌面点应用时 NAS 给的是 /appview?anchor=…（404 页），
+        // 带上清单里的真实 path，应用窗用 base + path 打开。
+        try {
+            i.putExtra("path", Apps.resolve(this, anchor)?.path.orEmpty())
+        } catch (_: Throwable) {
+            i.putExtra("path", "")
+        }
         startActivity(i)
     }
 

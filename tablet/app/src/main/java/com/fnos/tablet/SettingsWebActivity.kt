@@ -17,7 +17,7 @@ import org.json.JSONObject
  * 入口：菜单「设置 → 偏好设置…」（MenuActions 的 set.prefs）。
  * 原来的原生 SettingsActivity 保留但不再从菜单进入（诊断导出等功能还在里面）。
  */
-class SettingsWebActivity : LocalWebActivity() {
+open class SettingsWebActivity : LocalWebActivity() {
 
     private val bridge: SettingsBridge by lazy { SettingsBridge(this) }
 
@@ -39,6 +39,12 @@ class SettingsWebActivity : LocalWebActivity() {
     }
 
     override fun pageUrl(): String = WebAssets.settingsUrl()
+
+    /**
+     * v5.1.34（用户 Bug B）：页面加载后是否自动弹出「应用宫格」。
+     * AppsActivity（应用宫格唯一入口）覆盖为 true；设置页本身仍由按钮打开。
+     */
+    open fun openGridOnLoad(): Boolean = false
 
     override fun preloadScript(): String = SettingsBridge.SHIM
 
@@ -81,6 +87,16 @@ class SettingsWebActivity : LocalWebActivity() {
             window.statusBarColor = 0xFF05060A.toInt()
             window.navigationBarColor = 0xFF05060A.toInt()
         } catch (_: Throwable) {}
+    }
+
+    /**
+     * v5.1.31-tablet17（用户任务 1 第 3 条）：每次回到页面都回读系统真实的
+     * pinnedShortcuts，把宫格 / 快捷方式列表里的「✓ 已钉到桌面」校准一次。
+     * 覆盖 AppsActivity（宫格唯一入口）与偏好设置页两条入口。
+     */
+    override fun onResume() {
+        super.onResume()
+        evalJs("try{window.__fnosRefreshPinned&&window.__fnosRefreshPinned()}catch(e){}")
     }
 
     /** SettingsBridge.installSkin 选文件时回调 */

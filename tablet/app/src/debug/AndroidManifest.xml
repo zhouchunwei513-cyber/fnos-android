@@ -17,6 +17,11 @@
             android:name=".LiveActivity"
             android:exported="true"
             tools:replace="android:exported" />
+        <!-- 偏好设置页同理：只为真机联调时直接 am start 截图，验证「没被改坏」 -->
+        <activity
+            android:name=".SettingsWebActivity"
+            android:exported="true"
+            tools:replace="android:exported" />
     </application>
 
 </manifest>

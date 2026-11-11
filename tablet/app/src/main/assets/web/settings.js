@@ -1437,6 +1437,527 @@
   const appActionStatus = document.getElementById('app-action-status');
   // v3.0.25（需求 2）：列表签名——用于静默比对，避免每次轮询都重绘导致闪烁/按钮状态丢失
   let __appListSig = null;
+
+  // ==================================================================
+  // v5.1.33（用户任务 1/1-B/2）：快捷方式面板的配套件
+  //   · 图标：原生代取 → data URI（页面 CSP 只放行 data:，直连 http 会被拦）
+  //   · 一键添加：先弹我们自己的确认框，再调 requestPinShortcut
+  //   · 手动兜底：图文指引 + 应用宫格（长按设为常用/置顶）
+  // ==================================================================
+  let __apps = [];
+
+  // ---- 弹窗外壳（只建一次）----
+  function dshModal(id, inner) {
+    let el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = id;
+      el.className = 'dsh-mask';
+      el.innerHTML = '<div class="dsh-modal">' + inner + '</div>';
+      document.body.appendChild(el);
+      el.addEventListener('click', function (e) { if (e.target === el) el.classList.remove('show'); });
+    }
+    return el;
+  }
+
+  /** 我们自己的确认框（MIUI 的系统框可能不出现，所以先问一次） */
+  function askConfirm(title, text) {
+    return new Promise(function (resolve) {
+      const el = dshModal('dsh-confirm',
+        '<div class="dsh-modal-title"></div>' +
+        '<div class="dsh-modal-body"></div>' +
+        '<div class="dsh-modal-foot">' +
+          '<button class="dsh-btn" data-act="cancel">取消</button>' +
+          '<button class="dsh-btn primary" data-act="ok">钉到桌面</button>' +
+        '</div>');
+      el.querySelector('.dsh-modal-title').textContent = title;
+      el.querySelector('.dsh-modal-body').textContent = text;
+      el.classList.add('show');
+      const okBtn = el.querySelector('[data-act="ok"]');
+      const noBtn = el.querySelector('[data-act="cancel"]');
+      function finish(v) {
+        el.classList.remove('show');
+        okBtn.onclick = null; noBtn.onclick = null;
+        resolve(v);
+      }
+      okBtn.onclick = function () { finish(true); };
+      noBtn.onclick = function () { finish(false); };
+    });
+  }
+
+  // ---- 图标：原生代取 → data URI ----
+  const __iconCache = Object.create(null);
+  async function iconDataFor(url) {
+    if (!url) return '';
+    if (__iconCache[url]) return __iconCache[url];
+    if (!window.fnosSettings || !window.fnosSettings.getIconData) return '';
+    try {
+      // 先吃缓存（不联网、立即返回）
+      const r = await window.fnosSettings.getIconData(url, false);
+      if (r && r.ok && r.dataUri) { __iconCache[url] = r.dataUri; return r.dataUri; }
+      // 缓存没有 → 让原生联网取一次（JavaBridge 线程，最多 3s）
+      const r2 = await window.fnosSettings.getIconData(url, true);
+      if (r2 && r2.ok && r2.dataUri) { __iconCache[url] = r2.dataUri; return r2.dataUri; }
+    } catch (_) {}
+    return '';
+  }
+  async function fillIcons() {
+    const imgs = Array.prototype.slice.call(document.querySelectorAll('img[data-icon-url]'));
+    const queue = imgs.filter(function (i) { return i.dataset.iconUrl && !i.dataset.iconDone; });
+    async function worker() {
+      while (queue.length) {
+        const img = queue.shift();
+        const uri = await iconDataFor(img.dataset.iconUrl);
+        if (uri) {
+          img.src = uri;
+          img.dataset.iconDone = '1';
+          img.style.display = '';
+        }
+      }
+    }
+    await Promise.all([worker(), worker(), worker(), worker()]);
+  }
+
+  // ---- 桌面能力探测 ----
+  async function loadPinSupport() {
+    const el = document.getElementById('pin-support');
+    if (!el) return;
+    if (!window.fnosSettings || !window.fnosSettings.getPinSupport) { el.textContent = ''; return; }
+    try {
+      const r = await window.fnosSettings.getPinSupport();
+      if (!r || !r.ok) { el.textContent = '桌面能力：未知'; return; }
+      let txt = r.supported
+        ? '桌面：' + (r.launcher || '未知') + ' · 支持一键添加 · 已钉 ' + r.pinned + ' 个'
+        : '桌面：' + (r.launcher || '未知') + ' · 不支持一键添加（可直接用应用宫格打开）';
+      // v5.1.33：MIUI 的「桌面快捷方式」app-op（10017）没开时，系统会收下请求但不落图标
+      if (r.supported && r.opAllowed === false) {
+        txt += ' · ⚠ 桌面快捷方式权限未开启（点此开启）';
+      }
+      el.textContent = txt;
+      el.className = 'pin-support ' + (r.supported && r.opAllowed !== false ? 'ok' : 'warn');
+      el.style.cursor = (r.opAllowed === false) ? 'pointer' : '';
+      el.onclick = (r.opAllowed === false) ? function () { openShortcutPerm(); } : null;
+    } catch (_) { el.textContent = ''; }
+  }
+
+  // ---- 一键添加 ----
+  function openShortcutPerm() {
+    try {
+      if (window.fnosSettings && window.fnosSettings.openShortcutPerm) {
+        window.fnosSettings.openShortcutPerm({});
+      }
+    } catch (_) {}
+  }
+
+  async function pinApp(appData, btn) {
+    if (!window.fnosSettings || !window.fnosSettings.createDesktopShortcut) return false;
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '请求中...'; }
+    let r = null;
+    try {
+      r = await window.fnosSettings.createDesktopShortcut({
+        appId: appData.appId,
+        appName: appData.appName || appData.appId,
+        iconPath: appData.iconPath || '',
+        nasAddress: appData.nasAddress || '',
+      });
+    } catch (e) {
+      r = { success: false, msg: e.message };
+    }
+    if (r && r.success) {
+      // v5.1.33：桌面"受理"不等于"落图标"。MIUI 会返回 true 然后静默丢弃
+      // （系统日志：add shortcut failed, <pkg> has no permission）。
+      // 所以这里先挂「等待确认」，2.5 秒后回读真实 pinnedShortcuts 再说话。
+      const appName = appData.appName || appData.appId;
+      const pinId = 'fn-pin-' + appData.appId;
+      if (btn) { btn.textContent = '等待桌面确认…'; btn.disabled = true; }
+      if (appActionStatus) {
+        appActionStatus.textContent = '已请求添加到桌面：' + appName +
+          '（系统桌面若弹出「添加」，请点一下）';
+      }
+      setTimeout(async function () {
+        let landed = false;
+        try {
+          const s = await window.fnosSettings.getPinnedIds({});
+          const ids = (s && s.ids) || [];
+          landed = ids.indexOf(pinId) >= 0;
+        } catch (_) {}
+        if (landed) {
+          if (btn) {
+            btn.textContent = '✓ 已钉到桌面';
+            btn.classList.add('success');
+            btn.disabled = true;
+            btn.title = '已钉到桌面';
+          }
+          // 宫格里的「✓ 已钉」标记同步
+          (__apps || []).forEach(function (a) { if (a.appId === appData.appId) a.pinned = true; });
+          try { if (document.getElementById('dsh-grid')) renderGrid(); } catch (_) {}
+          if (appActionStatus) appActionStatus.textContent = '已钉到桌面：' + appName;
+          loadPinSupport();
+        } else {
+          if (btn) { btn.textContent = old || '钉到桌面'; btn.disabled = false; }
+          if (appActionStatus) {
+            appActionStatus.textContent = '桌面未确认添加：' + appName +
+              ' —— 检查顶部「桌面快捷方式权限」，开启后重试';
+          }
+          loadPinSupport();
+        }
+      }, 2500);
+      return true;
+    }
+    const msg = (r && r.msg) || '未知错误';
+    if (btn) { btn.textContent = old || '钉到桌面'; btn.disabled = false; }
+    if (appActionStatus) {
+      appActionStatus.textContent = '未能钉到桌面：' + msg +
+        '（若提示权限未开启，点上方状态条跳转开启后重试）';
+    }
+    return false;
+  }
+
+  // ---- v5.1.35（用户需求）：全部钉到桌面 / 清理全部快捷方式 ----
+  const pinAllBtn = document.getElementById('pin-all');
+  const pinClearBtn = document.getElementById('pin-clear');
+  const pinAllStatus = document.getElementById('pin-all-status');
+
+  function pinAllSay(text) {
+    if (!pinAllStatus) return;
+    pinAllStatus.style.display = text ? 'block' : 'none';
+    pinAllStatus.textContent = text || '';
+  }
+
+  // 原生批量钉的进度回调（SettingsBridge 用 evaluateJavascript 推过来）
+  window.__fnosPinAllProgress = function (s) {
+    if (!s) return;
+    const cur = s.current ? '：' + s.current : '';
+    pinAllSay('正在钉 ' + s.done + '/' + s.total + ' …' + cur);
+  };
+
+  window.__fnosPinAllDone = function (r) {
+    if (pinAllBtn) {
+      pinAllBtn.dataset.running = '';
+      pinAllBtn.disabled = false;
+      pinAllBtn.textContent = '全部钉到桌面';
+    }
+    if (!r) { pinAllSay('批量钉到桌面已结束'); return; }
+    let txt = '✓ 已完成：成功 ' + (r.ok || 0) + ' 个，已存在 ' + (r.exists || 0) +
+      ' 个，失败 ' + (r.fail || 0) + ' 个';
+    const fails = r.failures || [];
+    if (fails.length) {
+      txt += '\n失败原因：' + fails.slice(0, 10).map(function (f) {
+        return (f.name || '?') + ' → ' + (f.reason || '未知');
+      }).join('；') + (fails.length > 10 ? '；…共 ' + fails.length + ' 项（详见日志）' : '');
+    }
+    pinAllSay(txt);
+    // 完成后自动刷新面板上的「✓ 已钉到桌面」标记
+    if (__apps && __apps.length) { try { renderGrid(); } catch (_) {} }
+    __appListSig = null;
+    loadAppList(true);
+    loadPinSupport();
+  };
+
+  if (pinAllBtn) {
+    pinAllBtn.addEventListener('click', async function () {
+      if (pinAllBtn.dataset.running === '1') return;
+      if (!window.fnosSettings || !window.fnosSettings.pinAll) {
+        pinAllSay('当前版本不支持批量钉到桌面');
+        return;
+      }
+      pinAllBtn.dataset.running = '1';
+      pinAllBtn.disabled = true;
+      pinAllBtn.textContent = '钉到桌面中…';
+      pinAllSay('正在准备应用清单…');
+      try {
+        const r = await window.fnosSettings.pinAll({});
+        if (!r || !r.ok) {
+          pinAllBtn.dataset.running = '';
+          pinAllBtn.disabled = false;
+          pinAllBtn.textContent = '全部钉到桌面';
+          pinAllSay('无法开始：' + ((r && (r.error || r.msg)) || '未知错误'));
+          return;
+        }
+        pinAllSay('正在钉 0/' + (r.total || 0) + ' …');
+      } catch (e) {
+        pinAllBtn.dataset.running = '';
+        pinAllBtn.disabled = false;
+        pinAllBtn.textContent = '全部钉到桌面';
+        pinAllSay('无法开始：' + (e && e.message));
+      }
+    });
+  }
+
+  if (pinClearBtn) {
+    pinClearBtn.addEventListener('click', async function () {
+      if (!window.fnosSettings || !window.fnosSettings.clearShortcuts) {
+        pinAllSay('当前版本不支持清理快捷方式');
+        return;
+      }
+      const yes = await askConfirm(
+        '清理全部快捷方式',
+        '将清除本应用注册的动态快捷方式，并把已钉到桌面的图标置灰。\n\n' +
+        'Android 不允许应用直接删除桌面图标，灰色图标需要你在桌面上长按 → 移除。\n\n确定继续？'
+      );
+      if (!yes) return;
+      pinClearBtn.disabled = true;
+      pinClearBtn.textContent = '清理中…';
+      try {
+        const r = await window.fnosSettings.clearShortcuts({});
+        if (r && r.ok) {
+          pinAllSay('✓ ' + (r.msg ||
+            ('已清理动态快捷方式 ' + (r.dynamicRemoved || 0) + ' 个')));
+        } else {
+          pinAllSay('清理失败：' + ((r && (r.error || r.msg)) || '未知错误'));
+        }
+      } catch (e) {
+        pinAllSay('清理失败：' + (e && e.message));
+      }
+      pinClearBtn.disabled = false;
+      pinClearBtn.textContent = '清理全部快捷方式';
+      __appListSig = null;
+      loadAppList(true);
+      loadPinSupport();
+    });
+  }
+
+  // v5.1.34（用户 Bug B）：原来的「手动添加指引」（长按桌面图标 → 拖到桌面）已整段删除。
+  // 真机实测 MIUI Pad 5 Pro 长按「飞牛平板」图标不弹任何菜单（截图 /tmp/h1.png），
+  // 那条路径在本机不成立，留着只会误导用户。现在唯一的入口是上面的应用宫格。
+
+  // ==================================================================
+  // v5.1.34（用户 Bug B）：应用宫格 —— App 内唯一的快捷方式入口
+  //   · 单击 = 直接打开该应用的应用窗（不再"点一下就钉桌面"）
+  //   · 长按 = 操作菜单：打开 / 钉到桌面 / 设为常用（置顶）
+  //   · 搜索 + 按 FPK 分组（第三方 / 官方 / 系统），38 个应用可查
+  //   · 图标走原生代取的 data URI（页面 CSP 只放行 data:）
+  // 注：MIUI Pad 实测「长按桌面应用图标」不弹快捷方式列表，所以不再提供那条路径。
+  // ==================================================================
+  const GRID_GROUPS = [
+    { key: 'thirdparty', title: '第三方应用' },
+    { key: 'official', title: '官方应用' },
+    { key: 'system', title: '系统应用' }
+  ];
+  let __gridQuery = '';
+
+  function openGrid() {
+    const el = dshModal('dsh-grid',
+      '<div class="dsh-modal-title">应用宫格</div>' +
+      '<div class="dsh-modal-body">' +
+        '<p class="dsh-hint"><b>单击</b> = 打开应用；<b>长按</b> = 操作菜单（打开 / 钉到桌面 / 设为常用）。共 <b class="dsh-grid-count">0</b> 个。</p>' +
+        '<input class="dsh-grid-search" type="search" placeholder="搜索应用（名称 / 标识）" />' +
+        '<div class="dsh-grid"></div>' +
+      '</div>' +
+      '<div class="dsh-modal-foot"><button class="dsh-btn" data-act="close">关闭</button></div>');
+    el.querySelector('[data-act="close"]').onclick = function () { el.classList.remove('show'); };
+    const q = el.querySelector('.dsh-grid-search');
+    q.value = __gridQuery;
+    q.oninput = function () { __gridQuery = q.value || ''; renderGrid(); };
+    el.classList.add('show');
+    renderGrid();
+    // 打开时静默刷新一次清单（新增应用/图标立刻可见）
+    loadAppList(true);
+  }
+
+  function gridGroupOf(app) {
+    const g = String(app.group || '').toLowerCase();
+    if (g === 'thirdparty' || g === 'official' || g === 'system') return g;
+    return 'other';
+  }
+
+  function renderGrid() {
+    const el = document.getElementById('dsh-grid');
+    if (!el) return;
+    const box = el.querySelector('.dsh-grid');
+    if (!box) return;
+    const q = (__gridQuery || '').trim().toLowerCase();
+    const list = (__apps || []).filter(function (a) {
+      if (!q) return true;
+      return String(a.appName || '').toLowerCase().indexOf(q) >= 0 ||
+        String(a.appId || '').toLowerCase().indexOf(q) >= 0;
+    });
+    const cnt = el.querySelector('.dsh-grid-count');
+    if (cnt) cnt.textContent = String(list.length);
+
+    const fav = list.filter(function (a) { return !!a.fav; });
+    const groups = [];
+    if (fav.length) groups.push({ title: '常用（置顶）', apps: fav });
+    GRID_GROUPS.forEach(function (g) {
+      const arr = list.filter(function (a) { return !a.fav && gridGroupOf(a) === g.key; });
+      if (arr.length) groups.push({ title: g.title, apps: arr });
+    });
+    const other = list.filter(function (a) { return !a.fav && gridGroupOf(a) === 'other'; });
+    if (other.length) groups.push({ title: '其它', apps: other });
+
+    box.innerHTML = '';
+    if (!groups.length) {
+      const empty = document.createElement('p');
+      empty.className = 'dsh-hint';
+      empty.textContent = (__apps || []).length ? '没有匹配的应用' : '应用清单还没拉到：请确认已连接到 NAS';
+      box.appendChild(empty);
+    }
+    groups.forEach(function (g) {
+      const sec = document.createElement('div');
+      sec.className = 'dsh-group';
+      const h = document.createElement('div');
+      h.className = 'dsh-group-title';
+      h.textContent = g.title + '（' + g.apps.length + '）';
+      const wrap = document.createElement('div');
+      wrap.className = 'dsh-grid-wrap';
+      g.apps.forEach(function (app) { wrap.appendChild(gridTile(app)); });
+      sec.appendChild(h);
+      sec.appendChild(wrap);
+      box.appendChild(sec);
+    });
+    fillIcons();
+  }
+
+  function gridTile(app) {
+    const tile = document.createElement('div');
+    tile.className = 'dsh-tile' + (app.fav ? ' fav' : '');
+    const iconUrl = app.iconUrl || '';
+    tile.innerHTML =
+      '<img class="dsh-tile-icon" alt="" data-icon-url="' + iconUrl + '"' +
+        (iconUrl ? '' : ' style="display:none"') + ' />' +
+      '<div class="dsh-tile-ph"' + (iconUrl ? ' style="display:none"' : '') + '></div>' +
+      '<div class="dsh-tile-name"></div>' +
+      '<div class="dsh-tile-tag">' + (app.fav ? '★ 常用' : (app.pinned ? '✓ 已钉' : '')) + '</div>';
+    tile.querySelector('.dsh-tile-name').textContent = app.appName || app.appId;
+    tile.querySelector('.dsh-tile-ph').textContent =
+      String(app.appName || app.appId || '?').trim().slice(0, 1);
+
+    let timer = null, longFired = false;
+    const cancel = function () { if (timer) { clearTimeout(timer); timer = null; } };
+    const start = function () {
+      longFired = false;
+      cancel();
+      timer = setTimeout(function () {
+        timer = null;
+        longFired = true;
+        openAppActions(app);
+      }, 600);
+    };
+    tile.addEventListener('touchstart', start, { passive: true });
+    tile.addEventListener('touchend', cancel);
+    tile.addEventListener('touchmove', cancel, { passive: true });
+    tile.addEventListener('touchcancel', cancel);
+    tile.addEventListener('mousedown', start);
+    tile.addEventListener('mouseup', cancel);
+    tile.addEventListener('mouseleave', cancel);
+    tile.addEventListener('contextmenu', function (e) {
+      e.preventDefault(); cancel(); longFired = true; openAppActions(app);
+    });
+    tile.addEventListener('click', function () {
+      if (longFired) { longFired = false; return; }
+      openAppNow(app);
+    });
+    return tile;
+  }
+
+  /** 单击宫格 = 直接打开该应用窗 */
+  async function openAppNow(app) {
+    if (!window.fnosSettings || !window.fnosSettings.openApp) {
+      if (appActionStatus) appActionStatus.textContent = '打开失败：当前版本不支持';
+      return;
+    }
+    const grid = document.getElementById('dsh-grid');
+    if (grid) grid.classList.remove('show');
+    try {
+      const r = await window.fnosSettings.openApp({
+        appId: app.appId,
+        appName: app.appName || app.appId,
+        anchor: app.anchor || app.appId,
+        path: app.path || '',
+        url: app.url || '',
+        nasAddress: app.nasAddress || ''
+      });
+      if (r && r.ok) {
+        if (appActionStatus) appActionStatus.textContent = '已打开：' + (app.appName || app.appId);
+      } else if (appActionStatus) {
+        appActionStatus.textContent = '打开失败：' + ((r && r.error) || '未知错误');
+      }
+    } catch (e) {
+      if (appActionStatus) appActionStatus.textContent = '打开失败：' + (e && e.message);
+    }
+  }
+
+  /** 长按宫格 = 操作菜单：打开 / 钉到桌面 / 设为常用（置顶） */
+  function openAppActions(app) {
+    const el = dshModal('dsh-app-actions',
+      '<div class="dsh-modal-title"></div>' +
+      '<div class="dsh-modal-body"><p class="dsh-hint dsh-actions-state"></p></div>' +
+      '<div class="dsh-modal-foot">' +
+        '<button class="dsh-btn" data-act="cancel">取消</button>' +
+        '<button class="dsh-btn" data-act="open">打开</button>' +
+        '<button class="dsh-btn" data-act="fav"></button>' +
+        '<button class="dsh-btn primary" data-act="pin">钉到桌面</button>' +
+      '</div>');
+    el.querySelector('.dsh-modal-title').textContent = app.appName || app.appId;
+    el.querySelector('.dsh-actions-state').textContent =
+      (app.fav ? '已在常用（置顶）' : '未置顶') + ' · ' + (app.pinned ? '已在桌面' : '未钉到桌面');
+    const openBtn = el.querySelector('[data-act="open"]');
+    const favBtn = el.querySelector('[data-act="fav"]');
+    const pinBtn = el.querySelector('[data-act="pin"]');
+    el.querySelector('[data-act="cancel"]').onclick = function () { el.classList.remove('show'); };
+    openBtn.onclick = function () { el.classList.remove('show'); openAppNow(app); };
+    favBtn.textContent = app.fav ? '取消常用' : '设为常用（置顶）';
+    favBtn.onclick = async function () { el.classList.remove('show'); await toggleFav(app.appId); };
+    pinBtn.onclick = async function () {
+      pinBtn.disabled = true;
+      pinBtn.textContent = '请求中…';
+      await pinApp(app, null);
+      el.classList.remove('show');
+    };
+    el.classList.add('show');
+  }
+
+  async function toggleFav(appId) {
+    if (!window.fnosSettings || !window.fnosSettings.setFavApps) return;
+    const s = new Set();
+    __apps.forEach(function (a) { if (a.fav) s.add(a.appId); });
+    if (s.has(appId)) s.delete(appId); else s.add(appId);
+    __apps.forEach(function (a) { a.fav = s.has(a.appId); });
+    try {
+      const r = await window.fnosSettings.setFavApps(Array.from(s));
+      if (r && r.ok) {
+        const name = (__apps.find(a => a.appId === appId) || {}).appName || appId;
+        if (appActionStatus) appActionStatus.textContent = (s.has(appId) ? '已设为常用：' : '已取消常用：') + name;
+      }
+    } catch (_) {}
+    __appListSig = null;      // 让主列表重绘（★ 标记变了）
+    renderGrid();
+    loadAppList(true);
+  }
+
+  /**
+   * v5.1.31-tablet17（用户任务 1 第 3/4 条）：原生 onResume 调用。
+   * 回读系统**真实**的 pinnedShortcuts（getPinnedShortcuts），把宫格与设置页列表里的
+   * 「✓ 已钉」状态一次性校准 —— 用户可能在系统桌面手动删掉图标，这里也要跟着变。
+   */
+  window.__fnosRefreshPinned = async function () {
+    try {
+      if (!window.fnosSettings || !window.fnosSettings.getPinnedIds) return;
+      const s = await window.fnosSettings.getPinnedIds({});
+      const ids = new Set((s && s.ids) || []);
+      (__apps || []).forEach(function (a) {
+        a.pinned = ids.has('fn-pin-' + a.appId);
+      });
+      try { if (document.getElementById('dsh-grid')) renderGrid(); } catch (_) {}
+      __appListSig = null;      // 强制主列表按真实 pinned 状态重绘
+      loadAppList(true);
+    } catch (_) {}
+  };
+
+  loadPinSupport();
+  try {
+    const gb = document.getElementById('open-app-grid');
+    if (gb) gb.addEventListener('click', openGrid);
+  } catch (_) {}
+  // v5.1.34（用户 Bug B）：AppsActivity 是宫格的唯一入口，启动即弹出
+  (async function openGridIfRequested() {
+    try {
+      const lm = await window.fnosSettings.getLaunchMode({});
+      if (lm && lm.openGrid) setTimeout(openGrid, 250);
+    } catch (_) {}
+  })();
+
   async function loadAppList(silent) {
     try {
       if (!window.fnosSettings || !window.fnosSettings.getInstalledApps) {
@@ -1457,10 +1978,14 @@
       }
       if (appListEmpty) appListEmpty.style.display = 'none';
       // v3.0.25（需求 2）：自动感知——应用增删/改名/换图标都会改变签名；签名未变则静默跳过重绘
-      const __sig = res.data.map(function (a) {
-        return [a.appId, a.appName || a.name || a.title || '', a.iconPath || '', a.iconUrl || '',
-          a.pinned ? 1 : 0].join('~');
-      }).join('|');
+      // v5.1.33：签名按 appId 排序后再拼，避免后端返回顺序抖动导致每 10 秒重建一次
+      //          DOM（重建会打断用户点击、并把页面滚动位置拉回顶部）。
+      const __sig = res.data.slice()
+        .sort(function (x, y) { return String(x.appId || '').localeCompare(String(y.appId || '')); })
+        .map(function (a) {
+          return [a.appId, a.appName || a.name || a.title || '', a.iconPath || '', a.iconUrl || '',
+            a.pinned ? 1 : 0, a.fav ? 1 : 0].join('~');
+        }).join('|');
       if (silent && __appListSig === __sig) {
         try { if (appActionStatus && !appActionStatus.textContent) appActionStatus.textContent = ''; } catch (_) {}
         return;
@@ -1475,61 +2000,69 @@
         appListLoading.textContent = '应用来源：' + srcLabel + ' · ' + res.data.length + ' 个';
         appListLoading.style.display = 'block';
       }
+      __apps = res.data;
+      // 宫格正开着时同步刷新（搜索/分组/已钉标记跟着变）
+      try { if (document.getElementById('dsh-grid')) renderGrid(); } catch (_) {}
       res.data.forEach((app) => {
         const card = document.createElement('div');
         card.className = 'app-card';
-        // 平板端图标来自 FPK 图标管理器（/api/icons/<name>/256）；PC 端仍走 iconPath
-        const iconSrc = app.iconUrl || (app.iconPath ? ('file://' + app.iconPath) : '');
         const pinned = !!app.pinned;
-        card.innerHTML = 
-          (iconSrc ? '<img class="app-card-icon" src="' + iconSrc + '" onerror="this.style.display=\'none\'" />' : '<div class="app-card-icon"></div>') +
+        const fav = !!app.fav;
+        // v5.1.33（用户任务 2）：图标不再直接写 http 地址 —— 设置页 CSP 是
+        //   img-src 'self' data: blob:
+        // 直接 <img src="http://<nas>:18080/api/icons/…"> 会被浏览器拦掉
+        // （webconsole: Refused to load … violates CSP）。现在先留空，
+        // 渲染完由 fillIcons() 向原生要 data URI（原生代取，带内存+磁盘缓存）。
+        const iconUrl = app.iconUrl || '';
+        card.innerHTML =
+          '<img class="app-card-icon" alt="" data-icon-url="' + iconUrl + '"' +
+            (iconUrl ? '' : ' style="display:none"') + ' />' +
           '<div class="app-card-info">' +
-            '<div class="app-card-name">' + (app.appName || app.appId || '未命名') + '</div>' +
-            '<div class="app-card-addr">' + (app.source === 'fpk' ? 'FPK 图标管理器' : (app.source === 'app-center' ? 'app-center' : (app.nasAddress || ''))) + '</div>' +
+            '<div class="app-card-name"></div>' +
+            '<div class="app-card-addr"></div>' +
           '</div>' +
           '<div class="app-card-actions">' +
+            '<button class="app-card-btn open-btn" data-app-id="' + app.appId + '" title="打开该应用（不经过主界面）">打开</button>' +
             '<button class="app-card-btn shortcut-btn' + (pinned ? ' success' : '') + '" data-app-id="' + app.appId + '" title="' +
-              (pinned ? '已创建' : '创建桌面快捷方式') + '"' + (pinned ? ' disabled' : '') + '>' +
-              (pinned ? '✓ 已创建' : '创建快捷方式') + '</button>' +
+              (pinned ? '已钉到桌面' : '钉到桌面（走系统桌面）') + '"' + (pinned ? ' disabled' : '') + '>' +
+              (pinned ? '✓ 已钉到桌面' : '钉到桌面') + '</button>' +
           '</div>';
+        // 文本一律走 textContent：应用名来自 NAS，不拼进 HTML
+        card.querySelector('.app-card-name').textContent =
+          (fav ? '★ ' : '') + (app.appName || app.appId || '未命名');
+        card.querySelector('.app-card-addr').textContent = (function () {
+          const g = String(app.group || '').toLowerCase();
+          const gname = g === 'thirdparty' ? '第三方应用'
+            : (g === 'official' ? '官方应用' : (g === 'system' ? '系统应用' : ''));
+          const src = app.source === 'fpk' ? 'FPK 图标管理器'
+            : (app.source === 'app-center' ? 'app-center' : (app.nasAddress || ''));
+          return (gname ? gname + ' · ' : '') + src;
+        })();
         appListEl.appendChild(card);
       });
+      fillIcons();
       // 绑定事件
       appListEl.querySelectorAll('.shortcut-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
           const appId = btn.dataset.appId;
           const appData = res.data.find(a => a.appId === appId);
           if (!appData) return;
-          btn.disabled = true;
-          btn.textContent = '创建中...';
-          try {
-            const result = await window.fnosSettings.createDesktopShortcut({
-              appId: appData.appId,
-              appName: appData.appName || appData.appId,
-              iconPath: appData.iconPath || '',
-              nasAddress: appData.nasAddress || '',
-            });
-            // 需求 2.1：结果反馈弹窗——成功固定文案"桌面快捷方式已生成"；
-            // 失败弹出主进程分类错误信息（权限不足 / 桌面路径不存在 / 其他）
-            if (result.success) {
-              // 平板端：成功后**一直**保持「✓ 已创建」并禁用（用户要求），不再 3 秒后复位
-              btn.textContent = '✓ 已创建';
-              btn.classList.add('success');
-              btn.disabled = true;
-              btn.title = '已创建';
-              if (appActionStatus) appActionStatus.textContent = '已创建快捷方式: ' + (appData.appName || appData.appId);
-              return;
-            } else {
-              btn.textContent = '创建失败';
-              if (appActionStatus) appActionStatus.textContent = '创建失败: ' + (result.msg || '未知错误');
-              alert('创建失败：' + (result.msg || '未知错误'));
-            }
-          } catch (e) {
-            btn.textContent = '创建失败';
-            if (appActionStatus) appActionStatus.textContent = '创建失败: ' + e.message;
-            alert('创建失败：' + e.message);
-          }
-          setTimeout(() => { btn.disabled = false; btn.textContent = '创建快捷方式'; btn.classList.remove('success'); }, 3000);
+          // v5.1.33（用户任务 1 第 3 步）：MIUI 会在调用后静默拒绝，
+          // 所以先弹**我们自己的**确认框，用户心里有数，再调 requestPinShortcut。
+          const yes = await askConfirm(
+            '添加到桌面',
+            '把「' + (appData.appName || appId) + '」的快捷方式钉到桌面？\n\n' +
+            '随后系统桌面可能会再弹一次「是否添加」，需要你点「添加」。'
+          );
+          if (!yes) return;
+          await pinApp(appData, btn);
+        });
+      });
+      // v5.1.34（用户 Bug B）：每行两个按钮 —— 打开 / 钉到桌面
+      appListEl.querySelectorAll('.open-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const appData = res.data.find(a => a.appId === btn.dataset.appId);
+          if (appData) openAppNow(appData);
         });
       });
     } catch (e) {

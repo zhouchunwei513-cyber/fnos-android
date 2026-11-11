@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 电视直播内置图标（v5.1.31-tablet17）
+     桌面快捷方式必须有图标：MIUI 对缺图标/非位图的 ShortcutInfo 会静默拒绝，
+     所以 Shortcuts.requestPinLive 会把这张矢量图光栅化成 192x192 位图再交给系统。
+     造型：深色圆角底板 + 电视外框 + 播放三角。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="192dp"
+    android:height="192dp"
+    android:viewportWidth="192"
+    android:viewportHeight="192">
+
+    <!-- 圆角底板 -->
+    <path
+        android:fillColor="#13203A"
+        android:pathData="M44,0 L148,0 A44,44 0 0 1 192,44 L192,148 A44,44 0 0 1 148,192 L44,192 A44,44 0 0 1 0,148 L0,44 A44,44 0 0 1 44,0 Z" />
+
+    <!-- 天线 -->
+    <path
+        android:pathData="M70,52 L58,32 M122,52 L134,32"
+        android:strokeColor="#7FB8FF"
+        android:strokeLineCap="round"
+        android:strokeWidth="5" />
+
+    <!-- 电视外框 -->
+    <path
+        android:fillColor="#0B1526"
+        android:pathData="M38,58 L154,58 A12,12 0 0 1 166,70 L166,130 A12,12 0 0 1 154,142 L38,142 A12,12 0 0 1 26,130 L26,70 A12,12 0 0 1 38,58 Z"
+        android:strokeColor="#5AA9FF"
+        android:strokeWidth="6" />
+
+    <!-- 播放三角 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M84,80 L84,120 L116,100 Z" />
+</vector>

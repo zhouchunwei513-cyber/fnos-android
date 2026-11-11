@@ -179,7 +179,16 @@
         <span class="bar"></span>
         <h2>应用快捷方式创建</h2>
       </div>
-      <p class="section-desc">列出已安装的 NAS 应用，可为每个应用创建桌面快捷方式。双击快捷方式由飞牛主程序代为打开对应应用（依赖主程序登录态）。</p>
+      <p class="section-desc">列出已安装的 NAS 应用（FPK 图标管理器清单）：<b>打开</b> = 直接进入该应用窗；<b>钉到桌面</b> = 在系统桌面生成快捷方式（点图标直达，不经过主界面）。</p>
+      <!-- v5.1.34（用户 Bug B）：桌面能力状态 + 应用宫格入口（唯一入口） -->
+      <div id="pin-support" class="pin-support">正在检测桌面能力…</div>
+      <!-- v5.1.35（用户需求）：一键把 FPK 全部应用 + 电视直播钉到桌面；已钉的自动跳过，可重复执行 -->
+      <div class="setup-actions" style="margin:8px 0 12px">
+        <button type="button" class="btn-ghost" id="open-app-grid">打开应用宫格</button>
+        <button type="button" class="btn-primary" id="pin-all">全部钉到桌面</button>
+        <button type="button" class="btn-ghost" id="pin-clear">清理全部快捷方式</button>
+      </div>
+      <div id="pin-all-status" style="display:none;margin:0 0 12px;font-size:13px;line-height:1.7;color:#94a3b8"></div>
       <!-- v2.1.11：通过快捷方式打开应用后，主程序后台化方式（用户可选项） -->
       <div class="hotkey-row" style="align-items:center;margin-bottom:14px">
         <div class="hotkey-label">

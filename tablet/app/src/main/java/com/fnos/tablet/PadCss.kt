@@ -121,6 +121,14 @@ main.container > .card {
 .app-card-name { font-size: 15px !important; }
 .app-card-btn { height: 40px !important; font-size: 13.5px !important; }
 
+/* v5.1.33：每个应用多了第二个动作（v5.1.34 起是「打开 / 钉到桌面」）后，横排会把应用名挤成 0 宽。
+   平板列宽只有 ~487px，所以改成「图标+名称」一行、按钮整行在下方。 */
+.app-card { flex-wrap: wrap !important; row-gap: 10px !important; }
+.app-card-icon { width: 44px !important; height: 44px !important; }
+.app-card-info { min-width: 120px !important; }
+.app-card-actions { flex: 1 0 100% !important; justify-content: flex-end !important; }
+.pin-support { font-size: 13px !important; padding: 10px 14px !important; }
+
 /* 等宽的关键：列里的任何子元素都不许把所在列撑宽 */
 .settings-section, .settings-section > * { min-width: 0 !important; max-width: 100% !important; }
 .settings-section img { max-width: 100% !important; height: auto; }

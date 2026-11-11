@@ -254,6 +254,35 @@ class SettingsBridge(private val host: SettingsWebActivity) {
             // ---------------------------------------------------------- 应用 / 快捷方式
             "getInstalledApps" -> installedApps()
             "createDesktopShortcut" -> createShortcut(obj(0))
+            // v5.1.33（用户任务 1-B / 任务 2）：
+            //   getPinSupport  —— 桌面是否支持一键添加（界面据此显示状态，不再瞎猜）
+            //   getIconData    —— FPK 图标经原生代取转 data URI（页面 CSP 只放行 data:）
+            //   setFavApps     —— 「设为常用/置顶」，决定动态快捷方式（长按图标可见）的前 15 个
+            "getPinSupport" -> pinSupport()
+            //   openApp        —— v5.1.34（Bug B）：应用宫格单击 = 直接打开应用窗
+            //   getLaunchMode  —— v5.1.34：AppsActivity 启动时自动弹出应用宫格
+            "openApp" -> openApp(obj(0))
+            "getLaunchMode" -> launchMode()
+            //   getPinnedIds   —— 回读桌面已钉住的快捷方式 id（界面据此确认「真的落桌面了」）
+            "getPinnedIds" -> pinnedIds()
+            //   openShortcutPerm —— 跳到 MIUI「权限 → 其它权限 → 桌面快捷方式」（AppOps 10017）
+            "openShortcutPerm" -> JSONObject()
+                .put("ok", Shortcuts.openShortcutPermSettings(host))
+            "getIconData" -> iconData(str(0), bool(1))
+            //   pinAll         —— 用户需求：设置页「全部钉到桌面」（FPK 全部应用 + 电视直播）
+            //                     立即返回 {ok,total}，进度/完成由原生推 window.__fnosPinAll*
+            "pinAll" -> pinAll()
+            //   clearShortcuts —— 用户需求：设置页「清理全部快捷方式」（动态全清 + 已钉置灰）
+            "clearShortcuts" -> clearShortcuts()
+            "setFavApps" -> {
+                val arr = env.optJSONArray("a")?.optJSONArray(0) ?: JSONArray()
+                val ids = ArrayList<String>()
+                for (i in 0 until arr.length()) ids.add(arr.optString(i, ""))
+                Apps.setFavorites(host, ids)
+                // 常用位一变，动态快捷方式排序跟着变（支持 dynamic shortcuts 的启动器可见）
+                try { Shortcuts.syncDynamic(host, Settings.load(host).server) } catch (_: Throwable) {}
+                JSONObject().put("ok", true).put("favApps", JSONArray(Apps.favorites(host)))
+            }
 
             // ---------------------------------------------------------- 皮肤
             "listSkins" -> listSkins()
@@ -496,12 +525,50 @@ class SettingsBridge(private val host: SettingsWebActivity) {
         }
     }
 
+    /** v5.1.33：一键添加的能力探测（设置页顶部状态条显示真实结果） */
+    private fun pinSupport(): JSONObject {
+        val s = Shortcuts.support(host)
+        Log2.w(
+            host,
+            "bridge: pinSupport supported=${s.supported} launcher=${s.launcher} pinned=${s.pinned} max=${s.max}"
+        )
+        return JSONObject()
+            .put("ok", true)
+            .put("supported", s.supported)
+            .put("launcher", s.launcher)
+            .put("launchers", JSONArray(Shortcuts.launchers(host)))
+            .put("pinned", s.pinned)
+            .put("max", s.max)
+            .put("sdk", s.sdk)
+            .put("opMode", s.opMode)
+            .put("opAllowed", s.opMode == 0 || s.opMode == -1)
+    }
+
+    /**
+     * v5.1.33（用户任务 2）：FPK 图标 → data URI。
+     *
+     * 为什么要绕这一道：设置页的 CSP 是 `img-src 'self' data: blob:`，
+     * 直接 `<img src="http://<nas>:18080/api/icons/…">` 会被拦（webconsole 实测 Refused to load）。
+     * 原生侧把字节取回来（内存 + 磁盘缓存），再转 base64 交给页面，
+     * 页面只认 data: —— PC 端页面那份 CSP 一行都不用改。
+     *
+     * 参数 {url, wait}：wait=false 只吃缓存（立即返回，可能 null）；wait=true 允许联网（最多 3s）。
+     */
+    private fun iconData(url0: String, wait: Boolean): JSONObject {
+        val url = url0.trim()
+        if (url.isEmpty()) return JSONObject().put("ok", false).put("error", "缺少 url")
+        val uri = try { RemoteIcons.dataUri(host, url, wait) } catch (_: Throwable) { null }
+        return if (uri == null) JSONObject().put("ok", false).put("pending", true).put("url", url)
+        else JSONObject().put("ok", true).put("url", url).put("dataUri", uri)
+    }
+
     private fun installedApps(): JSONObject {
         val base = currentBase()
         // 用户要求（第 5 项）：强制以 FPK 图标管理器为准；FPK 不通才回退 app-center / 内置清单。
         // refreshBlocking 内部按 60s 节流，设置页 10s 轮询不会反复打 NAS。
         Apps.refreshBlocking(host, base, 3500)
         val pinned = Shortcuts.pinnedIds(host)
+        val fav = try { Apps.favorites(host).toSet() } catch (_: Throwable) { emptySet() }
         val data = JSONArray()
         val seen = HashSet<String>()
         val icons = ArrayList<String>()
@@ -518,7 +585,13 @@ class SettingsBridge(private val host: SettingsWebActivity) {
                     .put("iconPath", "")
                     .put("iconUrl", e.iconUrl)
                     .put("source", e.source.ifBlank { Apps.sourceOf(host) })
+                    // v5.1.34（Bug A/B）：宫格与「打开」按钮要用到真实入口
+                    .put("path", e.path)
+                    .put("port", e.port)
+                    .put("url", e.url)
+                    .put("group", e.group)
                     .put("pinned", pinned.contains(Shortcuts.pinIdOf(e.id)))
+                    .put("fav", fav.contains(e.id))
                     .put("nasAddress", base)
             )
         }
@@ -536,10 +609,118 @@ class SettingsBridge(private val host: SettingsWebActivity) {
         )
         // 后台预取图标，用户点「创建快捷方式」时主线程直接命中缓存
         try { RemoteIcons.warm(host, icons) } catch (_: Throwable) {}
-        Log2.w(host, "bridge: installedApps n=${data.length()} source=${Apps.sourceOf(host)} pinned=${pinned.size}")
+        Log2.w(
+            host,
+            "bridge: installedApps n=${data.length()} source=${Apps.sourceOf(host)} " +
+                "pinned=${pinned.size} fav=${fav.size} icons=${icons.size}"
+        )
         return JSONObject().put("success", true).put("msg", "").put("data", data)
             .put("source", Apps.sourceOf(host))
+            .put("favApps", JSONArray(fav.toList()))
     }
+
+    /**
+     * v5.1.33（用户任务 1 验收）：把「已钉在桌面」的真实 id 交给页面。
+     * 一键添加返回 true 只代表桌面"受理"，MIUI 可能随后静默丢弃，
+     * 所以界面必须过 2 秒再回来问一次，见到 id 才算成功。
+     */
+    private fun pinnedIds(): JSONObject {
+        val ids = try { Shortcuts.pinnedIds(host) } catch (_: Throwable) { emptySet() }
+        Log2.w(host, "bridge: pinnedIds n=${ids.size} ids=${ids}")
+        return JSONObject()
+            .put("ok", true)
+            .put("ids", JSONArray(ids))
+            .put("n", ids.size)
+    }
+
+    /**
+     * 用户需求：设置页「全部钉到桌面」。
+     *
+     * 桥方法**立即返回**（不能占住 JavaBridge 线程 20 秒），真正的遍历在
+     * Shortcuts.pinAll 里用主线程 postDelayed 逐个跑；
+     * 进度与完成通过 host.evalJs 推给页面：
+     *   window.__fnosPinAllProgress({done,total,current,…})
+     *   window.__fnosPinAllDone({ok,exists,fail,failures:[{name,reason}]})
+     */
+    private fun pinAll(): JSONObject {
+        val base = currentBase()
+        val total = try {
+            Apps.all(host).map { it.id }.filter { it.isNotBlank() }.distinct().size + 1
+        } catch (_: Throwable) { 1 }
+        Log2.w(host, "bridge: pinAll.start total=$total base=$base")
+        main.post {
+            try {
+                Shortcuts.pinAll(
+                    host,
+                    base,
+                    onProgress = { done, tot, ok, exists, fail, current ->
+                        val o = JSONObject()
+                            .put("running", true)
+                            .put("done", done)
+                            .put("total", tot)
+                            .put("ok", ok)
+                            .put("exists", exists)
+                            .put("fail", fail)
+                            .put("current", current)
+                        host.evalJs(
+                            "try{window.__fnosPinAllProgress&&window.__fnosPinAllProgress($o)}catch(e){}"
+                        )
+                    },
+                    onDone = { r ->
+                        val arr = JSONArray()
+                        for ((name, reason) in r.failures) {
+                            arr.put(JSONObject().put("name", name).put("reason", reason))
+                        }
+                        val o = JSONObject()
+                            .put("running", false)
+                            .put("done", r.total)
+                            .put("total", r.total)
+                            .put("ok", r.ok)
+                            .put("exists", r.exists)
+                            .put("fail", r.fail)
+                            .put("failures", arr)
+                        host.evalJs(
+                            "try{window.__fnosPinAllDone&&window.__fnosPinAllDone($o)}catch(e){}"
+                        )
+                    }
+                )
+            } catch (e: Throwable) {
+                Log2.w(host, "bridge: pinAll crashed ${e.message}")
+                val o = JSONObject()
+                    .put("running", false)
+                    .put("ok", 0)
+                    .put("exists", 0)
+                    .put("fail", 1)
+                    .put("failures", JSONArray().put(
+                        JSONObject().put("name", "批量钉桌面").put("reason", e.message ?: e.toString())
+                    ))
+                host.evalJs("try{window.__fnosPinAllDone&&window.__fnosPinAllDone($o)}catch(e){}")
+            }
+        }
+        return JSONObject().put("ok", true).put("started", true).put("total", total)
+    }
+
+    /** 用户需求：设置页「清理全部快捷方式」（动态快捷方式全清 + 已钉的置灰） */
+    private fun clearShortcuts(): JSONObject {
+        return try {
+            val r = Shortcuts.clearAll(host)
+            Log2.w(
+                host,
+                "bridge: clearShortcuts dynamic=${r.dynamicRemoved} disabled=${r.pinnedDisabled} " +
+                    "pinned=${r.pinnedIds.size}"
+            )
+            JSONObject()
+                .put("ok", true)
+                .put("dynamicRemoved", r.dynamicRemoved)
+                .put("pinnedDisabled", r.pinnedDisabled)
+                .put("pinned", JSONArray(r.pinnedIds))
+                .put("msg", r.msg)
+        } catch (e: Throwable) {
+            Log2.w(host, "bridge: clearShortcuts failed ${e.message}")
+            JSONObject().put("ok", false).put("error", e.message ?: e.toString())
+        }
+    }
+
 
     /**
      * 等价 PC `create-desktop-shortcut`：返回 {success, msg, data}。
@@ -580,6 +761,42 @@ class SettingsBridge(private val host: SettingsWebActivity) {
         out.put("data", if (res.ok) JSONObject().put("path", "shortcut://$appId") else JSONObject.NULL)
         return out
     }
+
+    /**
+     * v5.1.34（用户 Bug B）：应用宫格「单击 = 直接打开该应用窗」。
+     * 参数 {appId, appName, anchor, path, url}，path 是 FPK 真实入口（见 Bug A）。
+     */
+    private fun openApp(p: JSONObject): JSONObject {
+        val appId = p.optString("appId", "").trim()
+        val appName = p.optString("appName", "").trim().ifBlank { appId }
+        val anchor = p.optString("anchor", "").trim().ifBlank { appId }
+        if (appId.isEmpty() && anchor.isEmpty()) {
+            return JSONObject().put("ok", false).put("error", "缺少 appId")
+        }
+        val path = p.optString("path", "").trim()
+        val url = p.optString("url", "").trim()
+        val base = currentBase()
+        main.post {
+            try {
+                val i = Intent(host, AppWindowActivity::class.java)
+                i.action = Shortcuts.ACTION_OPEN_APP
+                i.putExtra(Shortcuts.EXTRA_ANCHOR, anchor)
+                i.putExtra(Shortcuts.EXTRA_NAME, appName)
+                i.putExtra(Shortcuts.EXTRA_BASE, base)
+                i.putExtra(Shortcuts.EXTRA_PATH, path)
+                if (url.startsWith("http")) i.putExtra(Shortcuts.EXTRA_URL, url)
+                host.startActivity(i)
+                Log2.w(host, "bridge: openApp id=$appId anchor=$anchor path=$path url=$url")
+            } catch (t: Throwable) {
+                Log2.w(host, "bridge: openApp failed ${t.message}")
+            }
+        }
+        return ok()
+    }
+
+    /** v5.1.34：AppsActivity 启动时让页面自动弹出「应用宫格」 */
+    private fun launchMode(): JSONObject =
+        JSONObject().put("ok", true).put("openGrid", host.openGridOnLoad())
 
     // ------------------------------------------------------------------ 皮肤
 
@@ -778,6 +995,15 @@ class SettingsBridge(private val host: SettingsWebActivity) {
       backToConnect: call('backToConnect'),
       getInstalledApps: call('getInstalledApps'),
       createDesktopShortcut: call('createDesktopShortcut'),
+      openApp: call('openApp'),
+      getLaunchMode: call('getLaunchMode'),
+      getPinSupport: call('getPinSupport'),
+      getPinnedIds: call('getPinnedIds'),
+      openShortcutPerm: call('openShortcutPerm'),
+      getIconData: call('getIconData'),
+      setFavApps: call('setFavApps'),
+      pinAll: call('pinAll'),
+      clearShortcuts: call('clearShortcuts'),
       listSkins: call('listSkins'),
       installSkin: pending('installSkin'),
       deleteSkin: call('deleteSkin'),

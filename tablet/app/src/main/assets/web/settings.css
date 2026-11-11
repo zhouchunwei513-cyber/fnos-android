@@ -722,3 +722,135 @@ body::-webkit-scrollbar-thumb:hover {
 /* v3.0.63：「透明界面」的实际着色由 titlebar-inject 注入（html.fnos-ui-transparent>body），
    因为设置窗 body 的 #05060a 底色也在那里以 !important 注入，必须同处覆盖。
    本文件不需要额外规则。 */
+
+/* =========================================================================
+   v5.1.33（用户任务 1/1-B）：快捷方式面板
+   · .pin-support  桌面能力状态条（支持/不支持 requestPinShortcut 一目了然）
+   · .dsh-mask/.dsh-modal  我们自己的确认框、手动指引、应用宫格
+   ========================================================================= */
+.pin-support {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #9aa6bb;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.pin-support.ok { color: #86efac; border-color: rgba(74,222,128,0.28); background: rgba(74,222,128,0.08); }
+.pin-support.warn { color: #fcd34d; border-color: rgba(252,211,77,0.30); background: rgba(252,211,77,0.08); }
+
+.dsh-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2,4,10,0.62);
+  padding: 24px;
+}
+.dsh-mask.show { display: flex; }
+.dsh-modal {
+  width: min(720px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  border-radius: 14px;
+  background: #0d1119;
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 24px 64px rgba(0,0,0,0.55);
+  padding: 18px 20px 14px;
+  color: #dbe3ef;
+}
+.dsh-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f1f5fb;
+  margin-bottom: 10px;
+}
+.dsh-modal-body { font-size: 13px; line-height: 1.75; color: #c3ccdb; }
+.dsh-modal-body p { margin: 0 0 8px; }
+.dsh-hint { color: #8b97a9; font-size: 12px; }
+.dsh-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+.dsh-btn {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.06);
+  color: #cdd6e4;
+  font-size: 13px;
+  cursor: pointer;
+}
+.dsh-btn:hover { background: rgba(255,255,255,0.12); }
+.dsh-btn.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.dsh-btn.primary:hover { background: #1d4ed8; }
+
+/* v5.1.34（Bug B）：宫格 = 搜索框 + 分组 + 分组内自适应网格 */
+.dsh-grid { display: block; margin-top: 10px; }
+.dsh-grid-search {
+  width: 100%;
+  box-sizing: border-box;
+  height: 40px;
+  margin-top: 6px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.06);
+  color: #e2e8f2;
+  font-size: 14px;
+  outline: none;
+}
+.dsh-grid-search:focus { border-color: rgba(79,110,247,0.75); }
+.dsh-group-title {
+  margin: 14px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: #8b97a9;
+}
+.dsh-grid-wrap {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+.dsh-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 8px 10px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  transition: background .15s, border-color .15s;
+}
+.dsh-tile:hover { background: rgba(255,255,255,0.09); }
+.dsh-tile:active { background: rgba(79,110,247,0.18); }
+.dsh-tile.fav { border-color: rgba(252,211,77,0.45); background: rgba(252,211,77,0.08); }
+.dsh-tile-icon { width: 56px; height: 56px; border-radius: 12px; object-fit: cover; background: rgba(255,255,255,0.08); }
+.dsh-tile-ph {
+  width: 56px; height: 56px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(79,110,247,0.22); color: #dfe6ff;
+  font-size: 22px; font-weight: 600;
+}
+.dsh-tile-name {
+  font-size: 13px;
+  color: #e2e8f2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-tile-tag { font-size: 11px; color: #8b97a9; height: 14px; }
+.dsh-tile.fav .dsh-tile-tag { color: #fcd34d; }

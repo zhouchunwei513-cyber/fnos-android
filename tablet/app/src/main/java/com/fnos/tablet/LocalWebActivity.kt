@@ -60,6 +60,14 @@ abstract class LocalWebActivity : AppCompatActivity() {
     protected open fun onPrepareWeb(w: WebView) {}
 
     /**
+     * 页面加载完成后的扩展点（v5.1.31-tablet17）。
+     *
+     * 电视直播要在这里注入与主窗/应用窗同一份 PC 自绘标题栏（titlebar-inject.js），
+     * 默认空实现 —— 设置/帮助/关于三页行为完全不变。
+     */
+    protected open fun onWebPageFinished(w: WebView?) {}
+
+    /**
      * 页面容器（v5.1.33）：默认就是 WebView 本身，偏好设置/帮助/关于三页照旧。
      *
      * 电视直播页需要把**原生播放器（ExoPlayer）盖在页面的播放区上**，
@@ -202,6 +210,8 @@ abstract class LocalWebActivity : AppCompatActivity() {
                 val pj = padJs()
                 if (pj.isNotBlank()) safeEval(pj)
                 reveal()
+                // 子类扩展点（v5.1.31-tablet17：电视直播在这里注入 PC 自绘标题栏）
+                onWebPageFinished(view)
             }
 
             override fun onReceivedError(

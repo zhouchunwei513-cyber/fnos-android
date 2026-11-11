@@ -1,7 +1,10 @@
 package com.fnos.tablet
 
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.PointF
+import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -11,6 +14,7 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -41,7 +45,7 @@ import org.json.JSONObject
  * 横竖屏：Manifest 已声明 configChanges（不重建、页面不重载 → 当前频道不丢），
  * 旋转时只重新注入 PadCss.LIVE / LIVE_JS 并让原生播放器重新贴合播放区矩形。
  */
-class LiveActivity : LocalWebActivity() {
+class LiveActivity : LocalWebActivity(), TitlebarHost, MenuTarget {
 
     internal val bridge: LiveBridge by lazy { LiveBridge(this) }
 
@@ -52,6 +56,14 @@ class LiveActivity : LocalWebActivity() {
     private var sideBtn: TextView? = null
     private var isFullscreen = false
     private var embedTitle = ""
+
+    /** v5.1.31-tablet17：当前 NAS 地址（菜单/快捷方式要用） */
+    private var base = ""
+
+    /** 窗口级全屏（自绘标题栏的 □ 按钮；与播放器全屏 isFullscreen 区分） */
+    private var winFullscreen = false
+
+    private var menu: MenuPopup? = null
 
     /** 可用的直播 origin（如 http://100.103.38.13:34500），播放前由 bridge 解析一次 */
     @Volatile private var playOrigin = ""
@@ -87,7 +99,34 @@ class LiveActivity : LocalWebActivity() {
             w.settings.mediaPlaybackRequiresUserGesture = false
         } catch (_: Throwable) {}
         w.addJavascriptInterface(bridge, LiveBridge.IFACE)
+        // v5.1.31-tablet17（用户任务 3）：PC 自绘标题栏的 ipcRenderer 替身。
+        // 必须在页面脚本执行前挂好（本方法在 super.onCreate 的 loadUrl 之前被调用）。
+        try { TitlebarInject.attach(w, this, this, false) } catch (_: Throwable) {}
         Log2.w(this, "live: ready url=${WebAssets.liveUrl()} base=${intent?.getStringExtra("base").orEmpty()}")
+    }
+
+    /**
+     * v5.1.31-tablet17（用户任务 3）：直播页原来**没有标题栏** ——
+     * 它只继承了 LocalWebActivity，没有实现 TitlebarHost、也没注入 titlebar-inject.js。
+     * 现在与应用窗用同一份脚本、同一个 argv（--fnos-app-window）：
+     * 汉堡（同一套 PC 菜单）+ − □ ✕ + 账号球 + 皮肤全部一致。
+     */
+    override fun onWebPageFinished(w: WebView?) {
+        if (w == null) return
+        // 诊断开关（仅调试用）：--ez notb true 启动可跳过标题栏注入，用于 A/B 对比布局
+        if (intent?.getBooleanExtra("notb", false) == true) {
+            Log2.w(this, "live: titlebar skipped (notb)")
+            w.postDelayed({ try { w.evaluateJavascript(MEASURE_JS, null) } catch (_: Throwable) {} }, 900)
+            return
+        }
+        TitlebarInject.inject(w, this, false) { ok ->
+            Log2.w(this, "live: titlebar-inject ok=$ok")
+            // 标题栏会让出顶部 34px，#videoArea 位置随之下移，重新贴合原生播放器
+            w.postDelayed({ syncEmbedRect() }, 300)
+            w.postDelayed({ syncEmbedRect() }, 700)
+            // 几何埋点：核对标题栏让位后的页面宽度/播放区矩形（真机取证据用）
+            w.postDelayed({ try { w.evaluateJavascript(MEASURE_JS, null) } catch (_: Throwable) {} }, 900)
+        }
     }
 
     // ------------------------------------------------------------------ 原生播放（ExoPlayer）
@@ -124,7 +163,15 @@ class LiveActivity : LocalWebActivity() {
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY) Log2.w(this@LiveActivity, "live: ready ${embedTitle}")
+                if (playbackState == Player.STATE_READY) {
+                    Log2.w(this@LiveActivity, "live: ready ${embedTitle}")
+                    // 播放态几何埋点：确认原生播放器矩形与视频尺寸
+                    syncEmbedRect()
+                    try { web.evaluateJavascript(MEASURE_JS, null) } catch (_: Throwable) {}
+                    web.postDelayed({
+                        try { web.evaluateJavascript(MEASURE_JS, null) } catch (_: Throwable) {}
+                    }, 900)
+                }
                 if (playbackState == Player.STATE_BUFFERING) Log2.w(this@LiveActivity, "live: buffering ${embedTitle}")
             }
         })
@@ -283,6 +330,12 @@ class LiveActivity : LocalWebActivity() {
         lp.gravity = Gravity.TOP or Gravity.START
         pv.layoutParams = lp
         pv.requestLayout()
+        Log2.w(
+            this,
+            "live: rect x=${lp.leftMargin} y=${lp.topMargin} w=${lp.width} h=${lp.height}" +
+                " root=${root.width}x${root.height} vid=${player?.videoSize?.width}x${player?.videoSize?.height}" +
+                " dpr=${resources.displayMetrics.density}"
+        )
 
         // ✕ 一直在播放区右上角（全屏时就在整窗右上角）
         closeBtn?.let { b ->
@@ -330,8 +383,30 @@ class LiveActivity : LocalWebActivity() {
     // ------------------------------------------------------------------ 生命周期
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 先拿 NAS 地址：菜单/账号球/标题栏脚本的 nasOrigin 都要用（super 会立刻 loadUrl）
+        base = intent?.getStringExtra(Shortcuts.EXTRA_BASE)
+            ?: intent?.getStringExtra("base").orEmpty()
+        if (base.isBlank()) base = Settings.load(this).server
+        if (base.isNotBlank() && !base.startsWith("http")) {
+            base = try { Lines.normalize(base, Settings.load(this).line) } catch (_: Exception) { base }
+        }
+        TitlebarInject.nasOrigin = try {
+            Uri.parse(base).let { u -> "${u.scheme}://${u.authority}" }
+        } catch (_: Exception) { "" }
         super.onCreate(savedInstanceState)
-        Log2.w(this, "live: onCreate")
+        // v5.1.31-tablet17（用户任务 3 第 3 条）：窗口按钮语义与主窗/应用窗一致 ——
+        // 默认是「窗口态」（系统栏可见），标题栏 □ 才是「页面全屏」（隐藏系统栏）。
+        // 这里不再强制沉浸，否则第一个 □ 反而是退出全屏，语义反了。
+        winFullscreen = false
+        try { TitlebarInject.warmUp(this) } catch (_: Throwable) {}
+        Log2.w(this, "live: onCreate base=$base nasOrigin=${TitlebarInject.nasOrigin}")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 皮肤/标题栏配置可能在设置页改过 → 回到本页时推一次（与主窗/应用窗同款）
+        TitlebarInject.pushTitlebarSettings(web, this)
+        web.postDelayed({ syncEmbedRect() }, 260)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -344,6 +419,104 @@ class LiveActivity : LocalWebActivity() {
         settle.forEach { d -> web.postDelayed({ syncEmbedRect() }, d.toLong()) }
         Log2.w(this, "live: config o=${newConfig.orientation} ${newConfig.screenWidthDp}x${newConfig.screenHeightDp}")
     }
+
+    // ---------------------------------------------------------- TitlebarHost
+
+    /** ✕ = 关闭直播窗（播放器随 Activity 释放） */
+    override fun tbClose() = finish()
+
+    /** — = 退到后台：Activity 不销毁，ExoPlayer 继续出声（直播音频继续） */
+    override fun tbMinimize() {
+        moveTaskToBack(true)
+        Log2.w(this, "live: minimize -> background (audio keeps playing)")
+    }
+
+    /** □ = 窗口全屏 / 还原（隐藏或恢复系统栏），与主窗、应用窗语义一致 */
+    override fun tbToggleMaximize() {
+        winFullscreen = !winFullscreen
+        Ui.immersive(this, winFullscreen)
+        TitlebarInject.emit(web, "window:fullscreen-changed", if (winFullscreen) "true" else "false")
+        web.postDelayed({ syncEmbedRect() }, 260)
+        Log2.w(this, "live: window fullscreen=$winFullscreen")
+    }
+
+    /** 账号球「添加账号」：直播窗没有连接页，关掉本窗交给主窗 */
+    override fun tbBackToConnect() = finish()
+
+    /** ☰ = 与主窗 / 应用窗同一份 PC 菜单（MenuPopup + MenuModel） */
+    override fun tbPopupMenu(anchorJson: String?) {
+        val d = resources.displayMetrics.density
+        val p = try {
+            val o = org.json.JSONObject(anchorJson ?: "null")
+            PointF(
+                (o.optDouble("left", 8.0) * d).toFloat(),
+                (o.optDouble("bottom", 34.0) * d + 2f).toFloat()
+            )
+        } catch (_: Exception) { PointF(8f * d, 36f * d) }
+        try {
+            menu?.dismiss()
+            menu = MenuPopup(this, p, this).also { it.show() }
+        } catch (e: Throwable) {
+            Log2.w(this, "live: menu failed ${e.message}")
+        }
+    }
+
+    override fun tbIsFullscreen(): Boolean = winFullscreen
+
+    // ------------------------------------------------------------- MenuTarget
+
+    override val act: AppCompatActivity get() = this
+
+    override fun menuWeb(): WebView? = web
+
+    override fun menuBase(): String = base.ifBlank { Settings.load(this).server }
+
+    override fun menuGoHome() {
+        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+        finish()
+    }
+
+    /** 文件 → 锁定 FNOS：回主窗登录页并关掉直播窗 */
+    override fun menuLock() {
+        val i = Intent(this, MainActivity::class.java)
+        i.putExtra("lock", true)
+        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        startActivity(i)
+        finish()
+    }
+
+    override fun menuLoginOther() {
+        val i = Intent(this, MainActivity::class.java)
+        i.putExtra("lock", false)
+        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        startActivity(i)
+        finish()
+    }
+
+    override fun menuConnectTo(href: String) {
+        val i = Intent(this, MainActivity::class.java)
+        i.putExtra("connectTo", href)
+        i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        startActivity(i)
+        finish()
+    }
+
+    override fun menuMinimize() {
+        moveTaskToBack(true)
+    }
+
+    override fun menuHideAll() {
+        moveTaskToBack(true)
+    }
+
+    override fun menuHideToTray() {
+        moveTaskToBack(true)
+        toast("已隐藏到后台（直播音频继续）")
+    }
+
+    override fun menuCloseWindow() = finish()
+
+    override fun menuToggleFullscreen() = tbToggleMaximize()
 
     @Deprecated("兼容旧 API")
     override fun onBackPressed() {
@@ -365,6 +538,23 @@ class LiveActivity : LocalWebActivity() {
     }
 
     companion object {
+        /** 几何埋点：把视口/body/#app/#videoArea 的真实尺寸写进 startup.log */
+        private const val MEASURE_JS = "(function(){try{var d=document.documentElement," +
+            "b=document.body,a=document.getElementById('app'),v=document.getElementById('videoArea');" +
+            "var r=v?v.getBoundingClientRect():null;" +
+            "var o={stage:'measure',iw:window.innerWidth,ih:window.innerHeight," +
+            "dw:d.clientWidth,dh:d.clientHeight,bw:Math.round(b.getBoundingClientRect().width)," +
+            "appw:a?Math.round(a.getBoundingClientRect().width):-1," +
+            "vw:r?Math.round(r.width):-1,vh:r?Math.round(r.height):-1," +
+            "vx:r?Math.round(r.left):-1,vy:r?Math.round(r.top):-1," +
+            "zoom:(getComputedStyle(d).zoom||''),bh:getComputedStyle(d).getPropertyValue('--fnos-bar-h')," +
+            "dpr:window.devicePixelRatio,sw:document.body.scrollWidth," +
+            "swh:document.documentElement.scrollWidth," +
+            "el:(function(){var ids=['sidebar','stage','playerWrap','videoRow','video','ctrlBar','epgPanel'],o={};" +
+            "for(var i=0;i<ids.length;i++){var e=document.getElementById(ids[i]);if(!e){o[ids[i]]='-';continue;}" +
+            "var b=e.getBoundingClientRect();o[ids[i]]=[Math.round(b.left),Math.round(b.top),Math.round(b.width),Math.round(b.height),getComputedStyle(e).display].join(',');}return o;})()};" +
+            "if(window.fnosHost&&fnosHost.notify)fnosHost.notify('fnos:media-log',JSON.stringify(o));" +
+            "}catch(e){}})()";
         /** 与 PadCss.LIVE_JS 里 readRect() 同一份口径（物理像素） */
         private const val RECT_JS = "(function(){try{var el=document.getElementById('videoArea')" +
             "||document.getElementById('playerWrap');if(!el)return null;var r=el.getBoundingClientRect();" +

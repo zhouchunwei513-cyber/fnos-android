@@ -47,6 +47,9 @@ class AppWindowActivity : AppCompatActivity(), TitlebarHost, MenuTarget {
             ?: intent.getStringExtra("anchor").orEmpty()
         val url = intent.getStringExtra(Shortcuts.EXTRA_URL)
             ?: intent.getStringExtra("url").orEmpty()
+        // v5.1.34（Bug A）：快捷方式带过来的 FPK 真实入口（影视=/v、相册=/p）
+        val path = intent.getStringExtra(Shortcuts.EXTRA_PATH)
+            ?: intent.getStringExtra("path").orEmpty()
         base = intent.getStringExtra(Shortcuts.EXTRA_BASE)
             ?: intent.getStringExtra("base").orEmpty()
         if (base.isBlank()) base = Settings.load(this).server
@@ -59,7 +62,7 @@ class AppWindowActivity : AppCompatActivity(), TitlebarHost, MenuTarget {
         tvTitle.text = anchorName
         // 菜单「切换窗口」的数据源（等价 PC appWindows；不含主窗口）
         WindowRegistry.add(WindowRegistry.Entry(anchorName, intent))
-        Log2.w(this, "appwin: anchor=$anchor name=$anchorName base=$base url=$url action=${intent.action}")
+        Log2.w(this, "appwin: anchor=$anchor name=$anchorName base=$base path=$path url=$url action=${intent.action}")
 
         // 皮肤：兜底标题栏也跟皮肤一致
         try {
@@ -116,13 +119,60 @@ class AppWindowActivity : AppCompatActivity(), TitlebarHost, MenuTarget {
         Ui.immersive(this, true)
         fullscreen = true
 
-        val target = when {
-            url.startsWith("http") -> url
-            anchor.isNotBlank() && base.isNotBlank() -> Lines.appviewUrl(base, anchor)
-            else -> base
-        }
         Compat.install(web, this)
-        if (target.isNotBlank()) web.loadUrl(target) else Log2.w(this, "appwin: 没有可加载的地址")
+        loadTarget(anchor, path, url)
+    }
+
+    /**
+     * v5.1.34（用户 Bug A）：应用窗要加载**应用真实页**，不是 /appview。
+     *
+     * 优先级（Apps.launchUrl → Apps.urlFor）：快捷方式带的 path → 清单缓存里的 path
+     * → 第三方自带端口 url → 外壳微应用地址 → 工作台内置应用落工作台 → /app/<name>/ 回退
+     * → 最后才是 /appview?anchor=（NAS 上 404，会进「兼容模式」，正常不应走到）。
+     *
+     * 清单缓存可能是空的（冷启动直达本 Activity，没经过主界面）——
+     * 这时先在后台拉一次 FPK 清单（最多 2.5s）再加载，避免直接掉进兜底。
+     */
+    private fun loadTarget(anchor: String, path: String, url: String) {
+        val e = Apps.resolve(this, anchor)
+        // 「有可用信息」= 能拼出真实入口：path / 第三方端口 url / 清单里带 path 的条目。
+        // 老版本缓存只有 anchor 没有 path，这种情况必须重拉一次清单（否则会掉到 /app/<name>/）。
+        // 注意 path=="/" 是退化清单的产物（NAS 首页），不算可用信息——缓存里也可能留着它。
+        fun usable(p: String) = p.trim().isNotEmpty() && p.trim() != "/"
+        val haveInfo = usable(path) ||
+            (url.startsWith("http") && url.indexOf("/appview") < 0) ||
+            (e != null && (usable(e.path) || e.url.startsWith("http") || Apps.isShellApp(e)))
+        if (haveInfo || base.isBlank()) {
+            val target = Apps.launchUrl(this, base, anchor, path, url)
+            Log2.w(this, "appwin: load target=$target haveInfo=$haveInfo")
+            hintWorkbench(target)
+            web.loadUrl(target)
+            return
+        }
+        Log2.w(this, "appwin: 清单里没有可用的 path（anchor=$anchor），先拉一次 FPK 清单再加载")
+        Thread {
+            try { Apps.refreshBlocking(this, base, 2500, force = true) } catch (_: Throwable) {}
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val t = Apps.launchUrl(this, base, anchor, path, url)
+                Log2.w(this, "appwin: load target(after refresh)=$t")
+                hintWorkbench(t)
+                web.loadUrl(t)
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    /**
+     * v5.1.34：文件管理 / 应用中心 / 系统设置 是飞牛工作台的内置组件，
+     * NAS 上**没有**可直连的页面（实测 /app/<name>/ 返回 `invalid token`），
+     * 这种情况落到工作台并说明原因，避免用户以为是「没打开」。
+     */
+    private fun hintWorkbench(target: String) {
+        val root = base.trimEnd('/') + "/"
+        if (target == root) {
+            Toast.makeText(this, "$anchorName 是飞牛工作台内置应用，已打开工作台", Toast.LENGTH_LONG).show()
+            Log2.w(this, "appwin: $anchorName 无独立页面，落到工作台 $root")
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
