@@ -1460,8 +1460,10 @@
     return el;
   }
 
-  /** 我们自己的确认框（MIUI 的系统框可能不出现，所以先问一次） */
-  function askConfirm(title, text) {
+  /** 我们自己的确认框（MIUI 的系统框可能不出现，所以先问一次）
+   *  okText：确定按钮文案，默认「钉到桌面」保持既有调用不变；
+   *  清理快捷方式等破坏性操作要传自己的文案，避免按钮名不对路。 */
+  function askConfirm(title, text, okText) {
     return new Promise(function (resolve) {
       const el = dshModal('dsh-confirm',
         '<div class="dsh-modal-title"></div>' +
@@ -1472,6 +1474,7 @@
         '</div>');
       el.querySelector('.dsh-modal-title').textContent = title;
       el.querySelector('.dsh-modal-body').textContent = text;
+      if (okText) el.querySelector('[data-act="ok"]').textContent = okText;
       el.classList.add('show');
       const okBtn = el.querySelector('[data-act="ok"]');
       const noBtn = el.querySelector('[data-act="cancel"]');
@@ -1694,9 +1697,18 @@
       const yes = await askConfirm(
         '清理全部快捷方式',
         '将清除本应用注册的动态快捷方式，并把已钉到桌面的图标置灰。\n\n' +
-        'Android 不允许应用直接删除桌面图标，灰色图标需要你在桌面上长按 → 移除。\n\n确定继续？'
+        'Android 不允许应用直接删除桌面图标，灰色图标需要你在桌面上长按 → 移除。\n\n确定继续？',
+        '确定清理'
       );
       if (!yes) return;
+      // 破坏性操作：再确认一次（用户要求「二次确认」，防止重复测试时误点）
+      const yes2 = await askConfirm(
+        '再确认一次',
+        '这是不可逆的：桌面上的飞牛图标会全部置灰，只能由你在桌面上长按逐个移除。\n\n' +
+        '真的要继续吗？',
+        '真的清理'
+      );
+      if (!yes2) return;
       pinClearBtn.disabled = true;
       pinClearBtn.textContent = '清理中…';
       try {

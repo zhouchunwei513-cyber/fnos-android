@@ -2,6 +2,44 @@
 
 > 版本号由用户锁定：本轮改动**不升版本**，仍是 `versionCode 16 / 5.1.31-tablet16`。
 
+## [未发布] 2026-11-11 平板端「全部钉到桌面」一键功能
+
+### 新增 1：设置页一键把全部应用钉到桌面
+
+- 页面：偏好设置 → 应用快捷方式创建，新增按钮行「打开应用宫格 / **全部钉到桌面** / 清理全部快捷方式」，
+  下方 `#pin-all-status` 状态行。
+- 原生：`Shortcuts.pinAll()` —— 主线程 `postDelayed(400ms)` 逐个 `requestPinShortcut`，
+  不在页面里 for 循环（WebView 被遮挡时 `setTimeout` 会被节流，且并发下发会被 MIUI 丢）。
+- 进度回推：`SettingsBridge.pinAll()` 立即返回 `{ok,started,total}`（不占 JavaBridge 线程），
+  进度/结果通过 `evalJs` 调 `window.__fnosPinAllProgress` / `window.__fnosPinAllDone`。
+- 幂等：以 `getPinnedShortcuts()` 快照判断，已钉的直接跳过并计入「已存在」。
+- 批量模式传 `notify=false`：41 个应用连弹 41 个 Toast 既难看又会被系统限流，结果由页面汇总。
+- 完成汇总实测：`✓ 已完成：成功 0 个，已存在 39 个，失败 0 个`（第二次点）；首次 31 新钉 + 7 已存在。
+- 失败项：每个都 `Log2.w("shortcut: pinAll.fail id=… reason=…")`，并按两种原因归类
+  （MIUI AppOps 10017 未授权 / 请求受理但未落图标）。
+
+### 新增 2：清理全部快捷方式（二次确认）
+
+- `Shortcuts.clearAll()`：`removeAllDynamicShortcuts()` + 对已钉项 `disableShortcuts()`（置灰，附移除提示文案）。
+  Android 不允许应用直接删桌面图标，所以文案明确写「长按灰图标移除」。
+- 页面侧两道确认：`askConfirm('清理全部快捷方式', …, '确定清理')` → `askConfirm('再确认一次', …, '真的清理')`。
+
+### 修复：批量统计把「电视直播」误判为失败
+
+- 真因：批量队列用 `ID_LIVE`（`__fnos.live__`，PC 端保留标识）当 id，核对时拼成
+  `fn-pin-__fnos.live__`，与真实快捷方式 id `fn-pin-live` 对不上 → 明明已落地却记成失败。
+- 修法：新增 `LIVE_PIN_SUFFIX` / `LIVE_PIN_ID`，`requestPinLive()` 与 `pinAll()` 共用，
+  已钉时能正确走「已存在」分支。
+
+### 修复：确认框确定按钮文案写死「钉到桌面」
+
+- `askConfirm(title, text, okText)` 增加第三个参数；清理流程传「确定清理 / 真的清理」。
+
+### 未改动
+
+- 版本号仍 `5.1.31-tablet16 / code 16`；直播页 / 标题栏 / 快捷方式 URL 修正 / 设置页栅格 / 菜单：一行未动。
+- 未提交、未推送 GitHub。
+
 ## [未发布] 2026-11-11 平板端收尾三项
 
 ### 修复 1：电视直播「创建桌面快捷方式」点了没反应
